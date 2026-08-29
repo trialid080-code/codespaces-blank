@@ -21,3 +21,11 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.camera:camera-core:1.4.1")
 }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
