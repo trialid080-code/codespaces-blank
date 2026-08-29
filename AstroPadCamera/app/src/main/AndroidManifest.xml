@@ -1,31 +1,344 @@
-<?xml version="1.0" encoding="utf-8"?>
+package com.soumyalabs.astropad
 
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
+import android.view.Surface
+import android.view.TextureView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface as ComposeSurface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.unit.dp
 
-    <uses-permission android:name="android.permission.CAMERA" />
+class MainActivity : ComponentActivity() {
 
-    <uses-feature
-        android:name="android.hardware.camera"
-        android:required="true" />
+    private lateinit var cameraManager: CameraManager
+    private var cameraDevice: CameraDevice? = null
+    private var captureSession: CameraCaptureSession? = null
 
-    <application
-        android:allowBackup="true"
-        android:label="AstroPad Camera"
-        android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+    private lateinit var cameraThread: HandlerThread
+    private lateinit var cameraHandler: Handler
 
-        <activity
-            android:name=".MainActivity"
-            android:screenOrientation="landscape"
-            android:exported="true">
+    private val cameraPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                openCamera()
+            }
+        }
 
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        </activity>
+        cameraManager =
+            getSystemService(Context.CAMERA_SERVICE) as CameraManager
 
-    </application>
+        cameraThread = HandlerThread("AstroCameraThread")
+        cameraThread.start()
+        cameraHandler = Handler(cameraThread.looper)
 
-</manifest>
+        setContent {
+            MaterialTheme {
+                AstroPadCameraScreen(
+                    onSurfaceReady = { textureView ->
+                        textureView.surfaceTexture?.let {
+                            openCamera(textureView)
+                        }
+                    }
+                )
+            }
+        }
+
+        if (checkSelfPermission(Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            openCamera()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private var previewTextureView: TextureView? = null
+
+    private fun openCamera(textureView: TextureView? = previewTextureView) {
+
+        if (textureView != null) {
+            previewTextureView = textureView
+        }
+
+        val view = previewTextureView ?: return
+
+        if (!view.isAvailable) return
+
+        try {
+            val cameraId = "0"
+
+            val characteristics =
+                cameraManager.getCameraCharacteristics(cameraId)
+
+            val facing =
+                characteristics.get(CameraCharacteristics.LENS_FACING)
+
+            if (facing != CameraCharacteristics.LENS_FACING_BACK) {
+                return
+            }
+
+            cameraManager.openCamera(
+                cameraId,
+                object : CameraDevice.StateCallback() {
+
+                    override fun onOpened(camera: CameraDevice) {
+                        cameraDevice = camera
+                        startPreview(view)
+                    }
+
+                    override fun onDisconnected(camera: CameraDevice) {
+                        camera.close()
+                        cameraDevice = null
+                    }
+
+                    override fun onError(
+                        camera: CameraDevice,
+                        error: Int
+                    ) {
+                        camera.close()
+                        cameraDevice = null
+                    }
+                },
+                cameraHandler
+            )
+
+        } catch (e: SecurityException) {
+            e.printStackTrace()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun startPreview(textureView: TextureView) {
+
+        val camera = cameraDevice ?: return
+        val texture = textureView.surfaceTexture ?: return
+
+        texture.setDefaultBufferSize(
+            textureView.width.coerceAtLeast(1),
+            textureView.height.coerceAtLeast(1)
+        )
+
+        val surface = Surface(texture)
+
+        try {
+
+            val requestBuilder =
+                camera.createCaptureRequest(
+                    CameraDevice.TEMPLATE_PREVIEW
+                )
+
+            requestBuilder.addTarget(surface)
+
+            camera.createCaptureSession(
+                listOf(surface),
+                object : CameraCaptureSession.StateCallback() {
+
+                    override fun onConfigured(
+                        session: CameraCaptureSession
+                    ) {
+
+                        captureSession = session
+
+                        try {
+                            session.setRepeatingRequest(
+                                requestBuilder.build(),
+                                null,
+                                cameraHandler
+                            )
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+
+                    override fun onConfigureFailed(
+                        session: CameraCaptureSession
+                    ) {
+                        captureSession = null
+                    }
+                },
+                cameraHandler
+            )
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    override fun onDestroy() {
+
+        captureSession?.close()
+        captureSession = null
+
+        cameraDevice?.close()
+        cameraDevice = null
+
+        cameraThread.quitSafely()
+
+        super.onDestroy()
+    }
+}
+
+@Composable
+fun AstroPadCameraScreen(
+    onSurfaceReady: (TextureView) -> Unit
+) {
+
+    var iso by remember { mutableStateOf("AUTO") }
+    var shutter by remember { mutableStateOf("AUTO") }
+    var focus by remember { mutableStateOf("AUTO") }
+
+    ComposeSurface(
+        modifier = Modifier.fillMaxSize(),
+        color = Color.Black
+    ) {
+
+        Box(
+            modifier = Modifier.fillMaxSize()
+        ) {
+
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+
+                factory = { context ->
+
+                    TextureView(context).apply {
+
+                        surfaceTextureListener =
+                            object : TextureView.SurfaceTextureListener {
+
+                                override fun onSurfaceTextureAvailable(
+                                    surface: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                    onSurfaceReady(this@apply)
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(
+                                    surface: SurfaceTexture,
+                                    width: Int,
+                                    height: Int
+                                ) {
+                                }
+
+                                override fun onSurfaceTextureDestroyed(
+                                    surface: SurfaceTexture
+                                ): Boolean {
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(
+                                    surface: SurfaceTexture
+                                ) {
+                                }
+                            }
+                    }
+                },
+
+                update = {
+                    onSurfaceReady(it)
+                }
+            )
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Color.Black.copy(alpha = 0.75f)
+                    )
+                    .padding(12.dp)
+            ) {
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+
+                    Button(
+                        onClick = {
+                            iso = when (iso) {
+                                "AUTO" -> "100"
+                                "100" -> "200"
+                                "200" -> "400"
+                                "400" -> "800"
+                                "800" -> "1600"
+                                "1600" -> "3200"
+                                else -> "AUTO"
+                            }
+                        }
+                    ) {
+                        Text("ISO $iso")
+                    }
+
+                    Button(
+                        onClick = {
+                            shutter = when (shutter) {
+                                "AUTO" -> "1/30"
+                                "1/30" -> "1/10"
+                                "1/10" -> "1s"
+                                "1s" -> "5s"
+                                "5s" -> "10s"
+                                "10s" -> "20s"
+                                "20s" -> "30s"
+                                else -> "AUTO"
+                            }
+                        }
+                    ) {
+                        Text("SHUTTER $shutter")
+                    }
+
+                    Button(
+                        onClick = {
+                            focus = when (focus) {
+                                "AUTO" -> "FAR"
+                                "FAR" -> "∞"
+                                else -> "AUTO"
+                            }
+                        }
+                    ) {
+                        Text("FOCUS $focus")
+                    }
+                }
+            }
+        }
+    }
+}
