@@ -2,9 +2,11 @@ package com.soumyalabs.astropad
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.net.Uri
 import android.os.Bundle
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,220 +21,176 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Surface as ComposeSurface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import java.util.concurrent.Executors
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), AstroCamera.Listener {
+    private val executor = Executors.newSingleThreadExecutor()
+    private lateinit var cameraController: AstroCamera
+    private var textureView: TextureView? = null
+    private var previewSurface: Surface? = null
 
-    private val cameraPermission =
-        registerForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            // Camera permission result
+    private var status by mutableStateOf("Waiting for camera permission…")
+    private var isoLabel by mutableStateOf("AUTO")
+    private var shutterLabel by mutableStateOf("AUTO")
+    private var focusLabel by mutableStateOf("AUTO")
+    private var frames by mutableStateOf(1)
+
+    private val cameraPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            status = "Camera permission granted"
+            textureView?.let { if (it.isAvailable) startPreview(it) }
+        } else {
+            status = "Camera permission denied"
         }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        if (checkSelfPermission(Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            cameraPermission.launch(Manifest.permission.CAMERA)
-        }
-
+        cameraController = AstroCamera(this, executor, this)
         setContent {
-            MaterialTheme {
-                AstroPadCameraApp()
-            }
+            MaterialTheme { AstroPadCameraApp() }
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
+        } else {
+            status = "Camera permission granted"
         }
     }
-}
 
-@Composable
-fun AstroPadCameraApp() {
+    private fun startPreview(view: TextureView) {
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
+        val surfaceTexture = view.surfaceTexture ?: return
+        cameraController.preparePreview(surfaceTexture, view.width, view.height)
+        previewSurface?.release()
+        previewSurface = Surface(surfaceTexture)
+        cameraController.attachPreview(previewSurface!!)
+        cameraController.start()
+    }
 
-    var iso by remember { mutableStateOf("AUTO") }
-    var shutter by remember { mutableStateOf("AUTO") }
-    var focus by remember { mutableStateOf("AUTO") }
-    var frames by remember { mutableStateOf(20) }
+    private fun onPreviewDestroyed(surface: Surface) {
+        cameraController.detachPreview(surface)
+        if (previewSurface === surface) previewSurface = null
+        surface.release()
+    }
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = Color.Black
-    ) {
+    override fun onDestroy() {
+        cameraController.close()
+        executor.shutdown()
+        super.onDestroy()
+    }
 
-        Box(
-            modifier = Modifier.fillMaxSize()
-        ) {
+    override fun onStatus(message: String) {
+        runOnUiThread { status = message }
+    }
 
-            // Camera preview area
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
+    override fun onCaptureSaved(uri: Uri) {
+        runOnUiThread { status = "Saved: $uri" }
+    }
 
-                factory = { context ->
-                    FrameLayout(context).apply {
-                        layoutParams = ViewGroup.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.MATCH_PARENT
-                        )
-                    }
-                }
-            )
+    override fun onCaptureError(message: String) {
+        runOnUiThread { status = "ERROR: $message" }
+    }
 
-            // Top information bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.65f))
-                    .padding(12.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-
-                Text(
-                    text = "ASTROPAD",
-                    color = Color.White
+    @androidx.compose.runtime.Composable
+    private fun AstroPadCameraApp() {
+        ComposeSurface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context ->
+                        TextureView(context).also { view ->
+                            textureView = view
+                            view.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                                    startPreview(view)
+                                }
+                                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                                    cameraController.preparePreview(surface, width, height)
+                                }
+                                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                                    previewSurface?.let(::onPreviewDestroyed)
+                                    return true
+                                }
+                                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                            }
+                        }
+                    },
+                    update = { textureView = it }
                 )
 
-                Text(
-                    text = "RAW",
-                    color = Color.White
-                )
-
-                Text(
-                    text = "${frames} FRAMES",
-                    color = Color.White
-                )
-            }
-
-            // Pro controls
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = 0.75f))
-                    .padding(12.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-
-                    ProControl(
-                        title = "ISO",
-                        value = iso,
-                        onClick = {
-                            iso = when (iso) {
-                                "AUTO" -> "100"
-                                "100" -> "200"
-                                "200" -> "400"
-                                "400" -> "800"
-                                "800" -> "1600"
-                                "1600" -> "3200"
-                                else -> "AUTO"
-                            }
-                        }
-                    )
-
-                    ProControl(
-                        title = "SHUTTER",
-                        value = shutter,
-                        onClick = {
-                            shutter = when (shutter) {
-                                "AUTO" -> "1/30"
-                                "1/30" -> "1/10"
-                                "1/10" -> "1s"
-                                "1s" -> "5s"
-                                "5s" -> "10s"
-                                "10s" -> "20s"
-                                "20s" -> "30s"
-                                else -> "AUTO"
-                            }
-                        }
-                    )
-
-                    ProControl(
-                        title = "FOCUS",
-                        value = focus,
-                        onClick = {
-                            focus = when (focus) {
-                                "AUTO" -> "FAR"
-                                "FAR" -> "∞"
-                                else -> "AUTO"
-                            }
-                        }
-                    )
-                }
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-
-                    Button(
-                        onClick = {
-                            frames = when (frames) {
-                                20 -> 50
-                                50 -> 100
-                                100 -> 200
-                                else -> 20
-                            }
-                        }
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.65f)).padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Frames: $frames")
+                        Text("ASTROPAD", color = Color.White)
+                        Text("JPEG", color = Color.White)
+                        Text("${frames} FRAME${if (frames == 1) "" else "S"}", color = Color.White)
                     }
 
-                    Button(
-                        modifier = Modifier.size(100.dp),
-                        onClick = {
-                            // Capture stack will be connected here
-                        }
+                    Text(
+                        text = status,
+                        color = if (status.startsWith("ERROR:")) Color.Red else Color.White,
+                        modifier = Modifier.padding(12.dp)
+                    )
+
+                    Column(
+                        modifier = Modifier.align(Alignment.CenterHorizontally).fillMaxWidth().weight(1f),
+                        verticalArrangement = Arrangement.Bottom,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text("CAPTURE")
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.75f)).padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            ProControl("ISO", isoLabel) {
+                                val next = when (isoLabel) { "AUTO" -> 100; "100" -> 200; "200" -> 400; "400" -> 800; "800" -> 1600; "1600" -> 3200; else -> null }
+                                isoLabel = next?.toString() ?: "AUTO"
+                                cameraController.setIso(next)
+                            }
+                            ProControl("SHUTTER", shutterLabel) {
+                                val next = when (shutterLabel) { "AUTO" -> 1.0 / 30.0; "1/30" -> 0.1; "1/10" -> 1.0; "1s" -> 5.0; "5s" -> 10.0; "10s" -> 20.0; "20s" -> 30.0; else -> null }
+                                shutterLabel = when (next) { null -> "AUTO"; 1.0 / 30.0 -> "1/30"; 0.1 -> "1/10"; 1.0 -> "1s"; 5.0 -> "5s"; 10.0 -> "10s"; 20.0 -> "20s"; else -> "30s" }
+                                cameraController.setExposureSeconds(next)
+                            }
+                            ProControl("FOCUS", focusLabel) {
+                                val next = when (focusLabel) { "AUTO" -> 0f; "∞" -> null; else -> null }
+                                focusLabel = if (next == null) "AUTO" else "∞"
+                                cameraController.setFocusDistance(next)
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.75f)).padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Button(onClick = { frames = if (frames == 1) 5 else if (frames == 5) 10 else 1 }) { Text("Frames: $frames") }
+                            Button(modifier = Modifier.size(100.dp), onClick = { cameraController.capture() }) { Text("CAPTURE") }
+                        }
                     }
                 }
             }
         }
     }
-}
 
-@Composable
-fun ProControl(
-    title: String,
-    value: String,
-    onClick: () -> Unit
-) {
-
-    Button(
-        onClick = onClick
-    ) {
-
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-
-            Text(
-                text = title
-            )
-
-            Text(
-                text = value
-            )
+    @androidx.compose.runtime.Composable
+    private fun ProControl(title: String, value: String, onClick: () -> Unit) {
+        Button(onClick = onClick) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(title)
+                Text(value)
+            }
         }
     }
 }
