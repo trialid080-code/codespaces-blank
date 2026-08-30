@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -41,6 +42,36 @@ class AstroCamera(
     private var focusDistance: Float? = null
     private var pendingCapture = false
 
+    private fun backCameraId(): String {
+        val ids = manager.cameraIdList
+        if (ids.contains("0") && manager.getCameraCharacteristics("0").get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK) return "0"
+        return ids.firstOrNull { id ->
+            manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+        } ?: throw IllegalStateException("No back camera found")
+    }
+
+    fun preparePreview(surfaceTexture: SurfaceTexture, viewWidth: Int, viewHeight: Int) {
+        try {
+            val id = backCameraId()
+            val chars = manager.getCameraCharacteristics(id)
+            val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                ?: throw IllegalStateException("Camera $id has no stream configuration map")
+            val sizes = map.getOutputSizes(SurfaceTexture::class.java)
+            val targetRatio = viewWidth.toFloat() / viewHeight.coerceAtLeast(1)
+            val previewSize = sizes
+                .filter { it.width <= 1920 && it.height <= 1440 }
+                .ifEmpty { sizes.toList() }
+                .minWithOrNull(compareBy<android.util.Size> {
+                    kotlin.math.abs(it.width.toFloat() / it.height - targetRatio)
+                }.thenByDescending { it.width.toLong() * it.height })
+                ?: throw IllegalStateException("No SurfaceTexture preview size supported")
+            surfaceTexture.setDefaultBufferSize(previewSize.width, previewSize.height)
+            listener.onStatus("Preview stream ${previewSize.width}×${previewSize.height}")
+        } catch (t: Throwable) {
+            listener.onCaptureError("Preview setup failed: ${t.message ?: t.javaClass.simpleName}")
+        }
+    }
+
     fun attachPreview(surface: Surface) {
         previewSurface = surface
         if (camera != null) createSession()
@@ -56,9 +87,7 @@ class AstroCamera(
     fun start() {
         if (camera != null) return
         try {
-            val id = manager.cameraIdList.firstOrNull { id ->
-                manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
-            } ?: "0"
+            val id = backCameraId()
             val chars = manager.getCameraCharacteristics(id)
             characteristics = chars
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
