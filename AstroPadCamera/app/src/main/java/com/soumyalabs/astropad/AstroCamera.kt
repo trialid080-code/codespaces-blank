@@ -6,10 +6,11 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
-import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
@@ -238,7 +239,7 @@ class AstroCamera(
                     override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                         listener.onStatus("Saving JPEG…")
                     }
-                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CameraCaptureSession.CaptureFailure) {
+                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
                         pendingCapture = false
                         listener.onCaptureError("JPEG capture failed (reason ${failure.reason})")
                     }
