@@ -17,8 +17,6 @@ import android.provider.MediaStore
 import android.view.Surface
 import java.nio.ByteBuffer
 import java.util.concurrent.Executor
-import kotlin.math.max
-import kotlin.math.min
 
 class AstroCamera(
     private val context: Context,
@@ -37,11 +35,10 @@ class AstroCamera(
     private var previewSurface: Surface? = null
     private var imageReader: ImageReader? = null
     private var characteristics: CameraCharacteristics? = null
-    private var cameraId: String? = null
-    private var pendingCapture = false
     private var iso: Int? = null
     private var exposureNs: Long? = null
     private var focusDistance: Float? = null
+    private var pendingCapture = false
 
     fun attachPreview(surface: Surface) {
         previewSurface = surface
@@ -61,7 +58,6 @@ class AstroCamera(
             val id = manager.cameraIdList.firstOrNull { id ->
                 manager.getCameraCharacteristics(id).get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
             } ?: "0"
-            cameraId = id
             val chars = manager.getCameraCharacteristics(id)
             characteristics = chars
             val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
@@ -131,8 +127,8 @@ class AstroCamera(
                             val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                                 addTarget(preview)
                                 applyManualControls(this)
-                                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                                set(CaptureRequest.CONTROL_AE_MODE, if (iso != null || exposureNs != null) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON)
+                                set(CaptureRequest.CONTROL_AF_MODE, if (focusDistance != null) CameraMetadata.CONTROL_AF_MODE_OFF else CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                                set(CaptureRequest.CONTROL_AE_MODE, if (manualExposureActive()) CameraMetadata.CONTROL_AE_MODE_OFF else CameraMetadata.CONTROL_AE_MODE_ON)
                             }
                             newSession.setRepeatingRequest(request.build(), null, null)
                             listener.onStatus("Preview running")
@@ -154,7 +150,7 @@ class AstroCamera(
     fun setIso(value: Int?) {
         val range = characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
         iso = value?.takeIf { range != null && it in range }
-        if (value != null && iso == null) listener.onStatus("ISO $value is not supported")
+        if (value != null && iso == null) listener.onStatus("ISO $value is not supported by this camera")
         restartPreview()
     }
 
@@ -162,16 +158,18 @@ class AstroCamera(
         val range = characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
         val requested = seconds?.let { (it * 1_000_000_000.0).toLong() }
         exposureNs = requested?.takeIf { range != null && it in range }
-        if (requested != null && exposureNs == null) listener.onStatus("Shutter ${seconds}s is not supported")
+        if (requested != null && exposureNs == null) listener.onStatus("Shutter ${seconds}s is not supported by this camera")
         restartPreview()
     }
 
     fun setFocusDistance(value: Float?) {
-        val range = characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
-        focusDistance = value?.takeIf { range != null && range > 0f && it in 0f..range }
-        if (value != null && focusDistance == null) listener.onStatus("Manual focus is not supported")
+        val minimumFocusDistance = characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE)
+        focusDistance = value?.takeIf { minimumFocusDistance != null && minimumFocusDistance > 0f && it in 0f..minimumFocusDistance }
+        if (value != null && focusDistance == null) listener.onStatus("Manual focus is not supported by this camera")
         restartPreview()
     }
+
+    private fun manualExposureActive() = iso != null || exposureNs != null
 
     private fun restartPreview() {
         val s = session ?: return
@@ -181,8 +179,8 @@ class AstroCamera(
             val request = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                 addTarget(p)
                 applyManualControls(this)
-                set(CaptureRequest.CONTROL_AF_MODE, if (focusDistance != null) CaptureRequest.CONTROL_AF_MODE_OFF else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                set(CaptureRequest.CONTROL_AE_MODE, if (iso != null || exposureNs != null) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AF_MODE, if (focusDistance != null) CameraMetadata.CONTROL_AF_MODE_OFF else CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AE_MODE, if (manualExposureActive()) CameraMetadata.CONTROL_AE_MODE_OFF else CameraMetadata.CONTROL_AE_MODE_ON)
             }
             s.setRepeatingRequest(request.build(), null, null)
         } catch (t: Throwable) {
@@ -194,7 +192,6 @@ class AstroCamera(
         iso?.let { builder.set(CaptureRequest.SENSOR_SENSITIVITY, it) }
         exposureNs?.let { builder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, it) }
         focusDistance?.let { builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
-        if (focusDistance != null) builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
         builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
     }
 
@@ -208,8 +205,8 @@ class AstroCamera(
             val request = d.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
                 addTarget(reader.surface)
                 applyManualControls(this)
-                set(CaptureRequest.CONTROL_AF_MODE, if (focusDistance != null) CaptureRequest.CONTROL_AF_MODE_OFF else CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                set(CaptureRequest.CONTROL_AE_MODE, if (iso != null || exposureNs != null) CaptureRequest.CONTROL_AE_MODE_OFF else CaptureRequest.CONTROL_AE_MODE_ON)
+                set(CaptureRequest.CONTROL_AF_MODE, if (focusDistance != null) CameraMetadata.CONTROL_AF_MODE_OFF else CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                set(CaptureRequest.CONTROL_AE_MODE, if (manualExposureActive()) CameraMetadata.CONTROL_AE_MODE_OFF else CameraMetadata.CONTROL_AE_MODE_ON)
                 set(CaptureRequest.JPEG_ORIENTATION, 0)
             }
             s.capture(request.build(), object : CameraCaptureSession.CaptureCallback() {
