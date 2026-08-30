@@ -5,7 +5,6 @@ import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Bundle
-import android.view.Surface
 import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -21,7 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface as ComposeSurface
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,13 +30,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity(), AstroCamera.Listener {
-    private val executor = Executors.newSingleThreadExecutor()
     private lateinit var cameraController: AstroCamera
     private var textureView: TextureView? = null
-    private var previewSurface: Surface? = null
 
     private var status by mutableStateOf("Waiting for camera permission…")
     private var isoLabel by mutableStateOf("AUTO")
@@ -56,10 +52,8 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        cameraController = AstroCamera(this, executor, this)
-        setContent {
-            MaterialTheme { AstroPadCameraApp() }
-        }
+        cameraController = AstroCamera(this, this)
+        setContent { MaterialTheme { AstroPadCameraApp() } }
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             cameraPermission.launch(Manifest.permission.CAMERA)
         } else {
@@ -70,22 +64,11 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
     private fun startPreview(view: TextureView) {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val surfaceTexture = view.surfaceTexture ?: return
-        cameraController.preparePreview(surfaceTexture, view.width, view.height)
-        previewSurface?.release()
-        previewSurface = Surface(surfaceTexture)
-        cameraController.attachPreview(previewSurface!!)
-        cameraController.start()
-    }
-
-    private fun onPreviewDestroyed(surface: Surface) {
-        cameraController.detachPreview(surface)
-        if (previewSurface === surface) previewSurface = null
-        surface.release()
+        cameraController.setPreview(surfaceTexture, view.width, view.height)
     }
 
     override fun onDestroy() {
         cameraController.close()
-        executor.shutdown()
         super.onDestroy()
     }
 
@@ -93,8 +76,8 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
         runOnUiThread { status = message }
     }
 
-    override fun onCaptureSaved(uri: Uri) {
-        runOnUiThread { status = "Saved: $uri" }
+    override fun onPhotoSaved(uri: Uri) {
+        runOnUiThread { status = "Photo saved" }
     }
 
     override fun onCaptureError(message: String) {
@@ -103,7 +86,7 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
 
     @androidx.compose.runtime.Composable
     private fun AstroPadCameraApp() {
-        ComposeSurface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
+        Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
             Box(modifier = Modifier.fillMaxSize()) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -115,10 +98,10 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
                                     startPreview(view)
                                 }
                                 override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-                                    cameraController.preparePreview(surface, width, height)
+                                    if (view.isAvailable) cameraController.setPreview(surface, width, height)
                                 }
                                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
-                                    previewSurface?.let(::onPreviewDestroyed)
+                                    cameraController.close()
                                     return true
                                 }
                                 override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
@@ -161,7 +144,7 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
                             ProControl("SHUTTER", shutterLabel) {
                                 val next = when (shutterLabel) { "AUTO" -> 1.0 / 30.0; "1/30" -> 0.1; "1/10" -> 1.0; "1s" -> 5.0; "5s" -> 10.0; "10s" -> 20.0; "20s" -> 30.0; else -> null }
                                 shutterLabel = when (next) { null -> "AUTO"; 1.0 / 30.0 -> "1/30"; 0.1 -> "1/10"; 1.0 -> "1s"; 5.0 -> "5s"; 10.0 -> "10s"; 20.0 -> "20s"; else -> "30s" }
-                                cameraController.setExposureSeconds(next)
+                                cameraController.setShutterSeconds(next)
                             }
                             ProControl("FOCUS", focusLabel) {
                                 val next = when (focusLabel) { "AUTO" -> 0f; "∞" -> null; else -> null }
