@@ -5,7 +5,13 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
-import android.hardware.camera2.*
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.media.Image
 import android.media.ImageReader
 import android.net.Uri
@@ -16,6 +22,7 @@ import android.provider.MediaStore
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
+import kotlin.math.abs
 import kotlin.math.roundToLong
 
 class AstroCamera(
@@ -34,7 +41,6 @@ class AstroCamera(
     private var session: CameraCaptureSession? = null
     private var imageReader: ImageReader? = null
     private var previewSurface: Surface? = null
-    private var previewTexture: SurfaceTexture? = null
     private var pendingCapture = false
     private var iso: Int? = null
     private var exposureNs: Long? = null
@@ -46,26 +52,34 @@ class AstroCamera(
 
     fun setPreview(texture: SurfaceTexture, width: Int, height: Int) {
         handler.post {
-            closeSessionOnly()
-            previewTexture = texture
-            val size = choosePreviewSize(width, height)
-            texture.setDefaultBufferSize(size.first, size.second)
-            previewSurface = Surface(texture)
-            openCamera()
+            if (previewSurface != null && camera != null) {
+                closeSessionOnly()
+                previewSurface?.release()
+                previewSurface = null
+            }
+            try {
+                characteristics = manager.getCameraCharacteristics(cameraId)
+                val size = choosePreviewSize(width, height)
+                texture.setDefaultBufferSize(size.width, size.height)
+                previewSurface = Surface(texture)
+                openCamera()
+            } catch (e: Exception) {
+                listener.onCaptureError("Preview setup failed: ${e.message ?: e.javaClass.simpleName}")
+            }
         }
     }
 
-    private fun choosePreviewSize(viewWidth: Int, viewHeight: Int): Pair<Int, Int> {
+    private fun choosePreviewSize(viewWidth: Int, viewHeight: Int): android.util.Size {
         val chars = characteristics ?: manager.getCameraCharacteristics(cameraId).also { characteristics = it }
         val map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            ?: return Pair(viewWidth.coerceAtLeast(1), viewHeight.coerceAtLeast(1))
+            ?: throw IllegalStateException("Camera stream configuration is unavailable")
         val sizes = map.getOutputSizes(SurfaceTexture::class.java).orEmpty()
-        if (sizes.isEmpty()) return Pair(viewWidth.coerceAtLeast(1), viewHeight.coerceAtLeast(1))
-        val targetRatio = viewWidth.toFloat() / viewHeight.coerceAtLeast(1)
-        return sizes.minByOrNull { s ->
-            val ratio = s.width.toFloat() / s.height.toFloat()
-            kotlin.math.abs(ratio - targetRatio) * 10000f + kotlin.math.abs(s.width - viewWidth) + kotlin.math.abs(s.height - viewHeight)
-        }?.let { Pair(it.width, it.height) } ?: Pair(sizes[0].width, sizes[0].height)
+        if (sizes.isEmpty()) throw IllegalStateException("Camera has no SurfaceTexture preview sizes")
+        val targetRatio = viewWidth.toFloat() / viewHeight.coerceAtLeast(1).toFloat()
+        return sizes.minByOrNull { size ->
+            val ratio = size.width.toFloat() / size.height.toFloat()
+            abs(ratio - targetRatio) * 10000f + abs(size.width - viewWidth) + abs(size.height - viewHeight)
+        } ?: sizes[0]
     }
 
     private fun openCamera() {
@@ -76,14 +90,18 @@ class AstroCamera(
         try {
             characteristics = manager.getCameraCharacteristics(cameraId)
             val map = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val jpeg = map?.getOutputSizes(android.graphics.ImageFormat.JPEG)?.maxByOrNull { it.width.toLong() * it.height }
-                ?: android.util.Size(4080, 3060)
+                ?: throw IllegalStateException("Camera stream configuration is unavailable")
+            val jpeg = map.getOutputSizes(android.graphics.ImageFormat.JPEG).orEmpty()
+                .maxByOrNull { it.width.toLong() * it.height }
+                ?: throw IllegalStateException("Camera has no JPEG output size")
+
             imageReader?.close()
             imageReader = ImageReader.newInstance(jpeg.width, jpeg.height, android.graphics.ImageFormat.JPEG, 2).also {
                 it.setOnImageAvailableListener({ reader ->
-                    reader.acquireLatestImage()?.use { saveJpeg(it) }
+                    reader.acquireLatestImage()?.use { image -> saveJpeg(image) }
                 }, handler)
             }
+
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(device: CameraDevice) {
                     camera = device
@@ -112,6 +130,10 @@ class AstroCamera(
         try {
             device.createCaptureSession(listOf(preview, reader.surface), object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(s: CameraCaptureSession) {
+                    if (camera !== device) {
+                        s.close()
+                        return
+                    }
                     session = s
                     try {
                         val request = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
@@ -139,21 +161,27 @@ class AstroCamera(
         }
     }
 
-    fun setIso(value: Int) {
-        val range = characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        iso = range?.let { value.coerceIn(it.lower, it.upper) }
+    fun setIso(value: Int?) {
+        iso = value?.let { requested ->
+            characteristics?.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)?.let { range ->
+                requested.coerceIn(range.lower, range.upper)
+            }
+        }
         restartPreview()
     }
 
-    fun setShutterSeconds(value: Double) {
-        val range = characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
-        exposureNs = range?.let { (value * 1_000_000_000.0).roundToLong().coerceIn(it.lower, it.upper) }
+    fun setShutterSeconds(value: Double?) {
+        exposureNs = value?.let { seconds ->
+            characteristics?.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)?.let { range ->
+                (seconds * 1_000_000_000.0).roundToLong().coerceIn(range.lower, range.upper)
+            }
+        }
         restartPreview()
     }
 
-    fun setFocusDistance(value: Float) {
+    fun setFocusDistance(value: Float?) {
         val max = characteristics?.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f
-        focusDistance = if (max > 0f) value.coerceIn(0f, max) else null
+        focusDistance = value?.takeIf { max > 0f }?.coerceIn(0f, max)
         restartPreview()
     }
 
@@ -210,9 +238,9 @@ class AstroCamera(
                     override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                         listener.onStatus("Saving JPEG…")
                     }
-                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest) {
+                    override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CameraCaptureSession.CaptureFailure) {
                         pendingCapture = false
-                        listener.onCaptureError("JPEG capture failed")
+                        listener.onCaptureError("JPEG capture failed (reason ${failure.reason})")
                     }
                 }, handler)
                 listener.onStatus("Capturing JPEG…")
@@ -228,9 +256,8 @@ class AstroCamera(
             val buffer: ByteBuffer = image.planes[0].buffer
             val bytes = ByteArray(buffer.remaining())
             buffer.get(bytes)
-            val name = "Astro_${System.currentTimeMillis()}.jpg"
             val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.DISPLAY_NAME, "Astro_${System.currentTimeMillis()}.jpg")
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/AstroPadCamera")
@@ -267,7 +294,6 @@ class AstroCamera(
             imageReader = null
             previewSurface?.release()
             previewSurface = null
-            previewTexture = null
             thread.quitSafely()
         }
     }
