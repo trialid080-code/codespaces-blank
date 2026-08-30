@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
     private fun startPreview(view: TextureView) {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val surfaceTexture = view.surfaceTexture ?: return
-        surfaceTexture.setDefaultBufferSize(view.width.coerceAtLeast(1), view.height.coerceAtLeast(1))
+        cameraController.preparePreview(surfaceTexture, view.width, view.height)
         previewSurface?.release()
         previewSurface = Surface(surfaceTexture)
         cameraController.attachPreview(previewSurface!!)
@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
                                     startPreview(view)
                                 }
                                 override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-                                    surface.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
+                                    cameraController.preparePreview(surface, width, height)
                                 }
                                 override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
                                     previewSurface?.let(::onPreviewDestroyed)
@@ -164,7 +164,7 @@ class MainActivity : ComponentActivity(), AstroCamera.Listener {
                                 cameraController.setExposureSeconds(next)
                             }
                             ProControl("FOCUS", focusLabel) {
-                                val next = when (focusLabel) { "AUTO" -> 0f; "0.0" -> null; else -> null }
+                                val next = when (focusLabel) { "AUTO" -> 0f; "∞" -> null; else -> null }
                                 focusLabel = if (next == null) "AUTO" else "∞"
                                 cameraController.setFocusDistance(next)
                             }
